@@ -508,10 +508,10 @@ def generate_report_html(profile: dict, results: list) -> str:
 <title>Academic Performance Report - {e(profile.get('name',''))}</title>
 <style>
 body{{font-family:Segoe UI,Arial,sans-serif;max-width:860px;margin:30px auto;color:#1c2333;padding:0 18px}}
-h1{{color:#4338ca;margin-bottom:0}} h2{{border-bottom:2px solid #e0e7ff;padding-bottom:4px;color:#312e81}}
+h1{{color:#2a78d6;margin-bottom:0}} h2{{border-bottom:2px solid #d8d7d2;padding-bottom:4px;color:#0b0b0b}}
 table{{border-collapse:collapse;width:100%;margin:10px 0}} th,td{{border:1px solid #dfe3ee;padding:8px;text-align:left}}
-th{{background:#eef2ff}} .meta{{background:#f5f7ff;padding:12px 16px;border-radius:10px}}
-.kpi{{display:flex;gap:12px;margin:14px 0}} .kpi div{{flex:1;background:#4338ca;color:#fff;padding:14px;border-radius:12px;text-align:center}}
+th{{background:#f1f1ee}} .meta{{background:#f6f6f4;padding:12px 16px;border-radius:10px}}
+.kpi{{display:flex;gap:12px;margin:14px 0}} .kpi div{{flex:1;background:#2a78d6;color:#fff;padding:14px;border-radius:12px;text-align:center}}
 .kpi b{{font-size:26px;display:block}} .card{{border:1px solid #dfe3ee;border-radius:10px;padding:4px 16px;margin:12px 0}}
 small{{color:#667}} @media print{{body{{margin:0}}}}
 </style></head><body>

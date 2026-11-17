@@ -1,0 +1,16 @@
+# Light and dark themes are both defined, so Streamlit follows the operating
+# system / browser setting by default (the app also has its own System/Light/Dark switch).
+[theme.light]
+primaryColor = "#2a78d6"
+backgroundColor = "#f6f6f4"
+secondaryBackgroundColor = "#fcfcfb"
+textColor = "#0b0b0b"
+
+[theme.dark]
+primaryColor = "#3987e5"
+backgroundColor = "#121211"
+secondaryBackgroundColor = "#1a1a19"
+textColor = "#f0efec"
+
+[client]
+toolbarMode = "minimal"

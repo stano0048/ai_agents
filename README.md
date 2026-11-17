@@ -1,22 +1,33 @@
-# AI-Powered Student Academic Advisory Agent
+# AI Agents Suite
 
-## Run
+One Streamlit app with three agents. Flat colours (no gradients), no emojis, Material icons for actions,
+and a theme control that follows the system (System / Light / Dark).
+
 ```
 pip install -r requirements.txt
 streamlit run app.py
+python tests/test_agents.py        # optional quick checks
 ```
 
+| Page | Assignment option | Intelligence |
+|---|---|---|
+| Academic Advisor | Option 1 - Rule-based reasoning and prediction | Ridge regression predicts unfinished exams; an expert-system rule base diagnoses weak subjects, picks study activities and a risk level; a resource recommender and study-time planner; a chat agent with what-if and goal calculations; HTML report |
+| Support Agent | Option 2 - NLP and conversational AI | TF-IDF + Logistic Regression intent classifier, TF-IDF retrieval over a knowledge base, blended confidence with answer / clarify / fallback / human hand-off, conversation memory for follow-ups, entity and frustration detection, learning from thumbs up/down and corrections, analytics |
+| Finance Agent | Option 3 - Machine learning and predictive analytics | Text classifier auto-categorises expenses and learns from corrections; pattern recognition (weekday profile, recurring bills, small-purchase leakage, outliers, duplicates); 50/30/20 excess detection; Ridge forecast chosen by back-testing; ranked saving strategies; savings-goal planner; HTML and CSV export |
+
 ## Files
-- `advisor_engine.py` - the AI: ML prediction, rule-based reasoning, recommender, chat agent, report generator
-- `app.py` - Streamlit interface (marks entry, dashboard, predictions, recommendations, chat, report)
+- `app.py` router, theme switch  |  `theme.py` flat light/dark design system
+- `views/advisor.py`, `views/support.py`, `views/finance.py` pages
+- `advisor_engine.py`, `support_engine.py`, `finance_engine.py` the AI logic (testable without the UI)
 
-## How it meets the AI requirement
-1. **Machine learning** - Ridge regression predicts the final mark for subjects whose exam is not yet sat, from CA average, CA trend, attendance and study hours (80% prediction interval shown). It is trained on synthetic data; replace with real historical records when available.
-2. **Rule-based reasoning** - an expert-system rule base diagnoses why a subject is weak (declining trend, inconsistent marks, exam-technique gap, low attendance/study time) and picks targeted study activities and a risk level.
-3. **Recommender** - matches subjects to learning resources and splits weekly study hours in proportion to need.
-4. **Conversational agent** - intent matching with fuzzy subject detection; supports what-if scenarios ("What if I score 70 in X exam?") and goal maths ("What do I need to get a B in X?").
-5. **Report** - downloadable personalised HTML report (open in a browser, Print > Save as PDF).
+## Theme
+The default **System** mode reads the browser/OS theme (`st.context.theme`); **Light** and **Dark** override it.
+Charts, tables and cards are drawn with the theme module so they follow the switch.
 
-## Marking scheme assumed
-CA (CAT1, CAT2, Assignment) = 30%, Exam = 70%. Grades: A 70+, B 60-69, C 50-59, D 40-49, E below 40. Change `CA_WEIGHT`, `EXAM_WEIGHT` and `GRADE_BANDS` in `advisor_engine.py` to match your university.
-# ai_agents
+## Honest notes
+- The advisor's prediction model is trained on synthetic data; the CA/exam weights (30/70) and grade bands are
+  assumptions in `advisor_engine.py`. Change them to match your university.
+- The support knowledge base is **sample content**. Replace the answers with your institution's official information.
+  Learned feedback is saved to `learned_support.json` (delete it to reset).
+- Finance categories and guideline percentages are standard defaults, and the sample data is generated. Entered data
+  stays in the browser session only.
