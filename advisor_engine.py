@@ -237,52 +237,25 @@ def _diagnose(r, attendance, study):
 # --------------------------------------------------------------------------
 # Learning resources recommender
 # --------------------------------------------------------------------------
-_RESOURCE_RULES = [
-    (r"program|coding|java|python|c\+\+|software|algorithm|data struct|oop|object",
-     [("CS50 - Harvard's intro to computer science", "https://cs50.harvard.edu"),
-      ("freeCodeCamp - guided coding practice", "https://www.freecodecamp.org"),
-      ("GeeksforGeeks - algorithms & data structures", "https://www.geeksforgeeks.org"),
-      ("HackerRank - timed coding challenges", "https://www.hackerrank.com")]),
-    (r"database|sql|dbms|data ?management",
-     [("SQLBolt - interactive SQL lessons", "https://sqlbolt.com"),
-      ("W3Schools SQL tutorial", "https://www.w3schools.com/sql/")]),
-    (r"web|html|css|javascript|php|internet",
-     [("MDN Web Docs - the authoritative reference", "https://developer.mozilla.org"),
-      ("freeCodeCamp - responsive web design", "https://www.freecodecamp.org"),
-      ("PHP manual", "https://www.php.net/manual/en/")]),
-    (r"network|telecom|communication",
-     [("Cisco Networking Academy", "https://www.netacad.com"),
-      ("GeeksforGeeks - computer networks", "https://www.geeksforgeeks.org")]),
-    (r"secur|crypt|forensic|ethic",
-     [("OWASP - web security learning resources", "https://owasp.org"),
-      ("TryHackMe - hands-on security labs", "https://tryhackme.com")]),
-    (r"math|calcul|algebra|statist|discrete|probab|numer",
-     [("Khan Academy - maths & statistics", "https://www.khanacademy.org"),
-      ("MIT OpenCourseWare - lectures & problem sets", "https://ocw.mit.edu")]),
-    (r"\bai\b|artificial|machine|intelligen|data ?sci|learning|analytic",
-     [("Kaggle Learn - short practical courses", "https://www.kaggle.com/learn"),
-      ("Google Machine Learning Crash Course", "https://developers.google.com/machine-learning/crash-course")]),
-    (r"operating|os\b|architecture|organi[sz]ation|system",
-     [("Operating Systems: Three Easy Pieces (free book)", "https://pages.cs.wisc.edu/~remzi/OSTEP/"),
-      ("GeeksforGeeks - operating systems", "https://www.geeksforgeeks.org")]),
-    (r"engineering|requirement|analysis|design|uml|project|management",
-     [("Refactoring Guru - design patterns & principles", "https://refactoring.guru"),
-      ("Coursera - software engineering courses", "https://www.coursera.org")]),
-]
-_GENERAL_RESOURCES = [
-    ("Khan Academy - free foundational lessons", "https://www.khanacademy.org"),
-    ("Coursera - university-level courses", "https://www.coursera.org"),
-    ("University library: past papers, lecture notes & e-books", ""),
-]
+_OFFLINE = None
 
 
-def resources_for(subject: str):
-    s = subject.lower()
-    found = []
-    for pattern, items in _RESOURCE_RULES:
-        if re.search(pattern, s):
-            found.extend(items)
-    return found[:4] if found else _GENERAL_RESOURCES
+def unit_research(subject: str, researcher=None) -> dict:
+    """Research a unit by its name (Gemini + Google Search, then Wikipedia/Open Library, then offline matching).
+    Works for ANY unit name, listed or not; nothing is picked at random."""
+    global _OFFLINE
+    if researcher is None:
+        if _OFFLINE is None:
+            from research import Researcher
+            _OFFLINE = Researcher(None, None, get=lambda *a, **k: None, use_web=False)
+        researcher = _OFFLINE
+    return researcher.research_unit(subject)
+
+
+def resources_for(subject: str, researcher=None):
+    """[(title, url)] for a unit, from research on the unit name."""
+    r = unit_research(subject, researcher)
+    return [(f"{x['title']} [{x['type']}]" if x.get("type") else x["title"], x["url"]) for x in r["resources"][:6]]
 
 
 # --------------------------------------------------------------------------
@@ -325,6 +298,11 @@ def overall_summary(results):
 # --------------------------------------------------------------------------
 # 3. CONVERSATIONAL AGENT
 # --------------------------------------------------------------------------
+_GENERIC_WORDS = {"systems", "system", "data", "computer", "computing", "introduction", "intro", "analysis", "design", "theory",
+                  "applied", "advanced", "management", "engineering", "science", "studies", "fundamentals", "principles",
+                  "and", "the", "for", "unit", "course", "subject"}
+
+
 def _find_subject(question: str, results):
     q = question.lower()
     for r in results:
@@ -333,7 +311,8 @@ def _find_subject(question: str, results):
     words = set(re.findall(r"[a-z+]{3,}", q))
     best, best_score = None, 0.0
     for r in results:
-        name_words = re.findall(r"[a-z+]{3,}", r["subject"].lower())
+        name_words = [w for w in re.findall(r"[a-z+]{3,}", r["subject"].lower()) if w not in _GENERIC_WORDS] or \
+            re.findall(r"[a-z+]{3,}", r["subject"].lower())
         score = 0.0
         for nw in name_words:
             for w in words:
@@ -347,136 +326,22 @@ def _fmt(r):
     return f"**{r['subject']}** - {r['predicted']:.0f}% (Grade {r['grade']})"
 
 
-def chat_response(question: str, profile: dict, results: list) -> str:
-    """Interpret a student's question and answer using the analysis results."""
-    q = question.lower().strip()
-    name = profile.get("name") or "there"
-    if not results:
-        return ("I don't have any marks to work with yet. Please enter your marks in the "
-                "**Marks** tab (or load the sample data) and I'll be able to help.")
+def chat_response(question: str, profile: dict, results: list, researcher=None) -> str:
+    """Answer a student's question. Understanding is done by advisor_chat (Gemini or a local intent classifier)."""
+    import advisor_chat
+    return advisor_chat.respond(question, profile, results, researcher)
 
-    summ = overall_summary(results)
-    subj = _find_subject(q, results)
 
-    # --- what-if: "what if I score 65 in X exam?" ---------------------------
-    m = re.search(r"(?:score|get|got|obtain|make|scored)\s+(\d{1,3})\b", q)
-    if m and subj and ("if" in q or "suppose" in q):
-        exam_mark = min(100, int(m.group(1)))
-        overall = CA_WEIGHT * subj["ca_avg"] + EXAM_WEIGHT * exam_mark
-        return (f"**What-if for {subj['subject']}:** with a coursework average of "
-                f"{subj['ca_avg']:.0f}% and an exam mark of {exam_mark}%, your final mark "
-                f"would be **{overall:.0f}% (Grade {grade_of(overall)} - {grade_label(overall)})**. "
-                f"My model currently expects about {subj['predicted']:.0f}%.")
-
-    # --- goal: "what do I need to get a B in X?" ----------------------------
-    m = re.search(r"(?:get|achieve|reach|aim for|target|score|earn)\s+(?:an?\s+)?"
-                  r"(second upper|second lower|first|pass|[abcd]|\d{2,3})\b", q)
-    if m and ("need" in q or "to get" in q or "to reach" in q or "to achieve" in q or "aim" in q):
-        key = m.group(1)
-        target = float(key) if key.isdigit() else TARGETS.get(key)
-        if target:
-            subjects = [subj] if subj else results
-            lines = []
-            for r in subjects:
-                need = needed_exam(r["ca_avg"], target)
-                if r["exam"] is not None:
-                    lines.append(f"- {_fmt(r)}: exam already sat ({r['exam']:.0f}%).")
-                elif need > 100:
-                    lines.append(f"- **{r['subject']}**: needs {need:.0f}% in the exam - not "
-                                 f"reachable with current coursework.")
-                elif need <= 0:
-                    lines.append(f"- **{r['subject']}**: already secured - any exam mark reaches {target:.0f}%.")
-                else:
-                    lines.append(f"- **{r['subject']}**: you need **{need:.0f}%** in the exam.")
-            return f"To reach an overall **{target:.0f}%**:\n" + "\n".join(lines)
-
-    # --- weakest / improvement ----------------------------------------------
-    if subj and re.search(r"improve|better|help|struggl|weak|resource|learn|study|revise|tips|how", q):
-        lines = [f"### {subj['subject']} - {subj['predicted']:.0f}% (Grade {subj['grade']}, risk: {subj['risk']})",
-                 "**Why:**"] + [f"- {x}" for x in subj["reasons"]]
-        lines += ["", "**What to do:**"] + [f"- {x}" for x in subj["activities"]]
-        res = resources_for(subj["subject"])
-        lines += ["", "**Resources:**"] + [f"- {t}" + (f" - {u}" if u else "") for t, u in res]
-        return "\n".join(lines)
-
-    if re.search(r"weak|struggl|worst|lowest|improve|focus|priorit|concern", q):
-        weak = sorted([r for r in results if r["weak"]], key=lambda r: -r["priority"])
-        if not weak:
-            return (f"Good news, {name}: none of your subjects is currently in the weak zone. "
-                    f"Your lowest is {_fmt(summ['worst'])}. Aim to lift it above 60% to stay safe.")
-        lines = [f"{i}. {_fmt(r)} - {r['reasons'][0]}" for i, r in enumerate(weak, 1)]
-        return ("These subjects need attention first (most urgent at the top):\n" + "\n".join(lines)
-                + "\n\nAsk me *'How can I improve <subject>?'* for a tailored plan.")
-
-    if re.search(r"strong|best|highest|top|good at", q):
-        top = sorted(results, key=lambda r: -r["predicted"])[:3]
-        return "Your strongest subjects:\n" + "\n".join(f"{i}. {_fmt(r)}" for i, r in enumerate(top, 1))
-
-    if re.search(r"predict|forecast|final|expect|project|outcome", q):
-        if subj:
-            return (f"For **{subj['subject']}** I predict **{subj['predicted']:.0f}%** "
-                    f"(likely range {subj['low']:.0f}-{subj['high']:.0f}%, Grade {subj['grade']}).")
-        lines = [f"- {_fmt(r)}  (range {r['low']:.0f}-{r['high']:.0f}%)" for r in results]
-        return (f"Predicted final marks:\n" + "\n".join(lines) +
-                f"\n\nOverall average **{summ['average']:.0f}%** - *{summ['classification']}*.")
-
-    if re.search(r"gpa|average|overall|class|degree|honou?rs|standing", q):
-        return (f"Your projected overall average is **{summ['average']:.1f}%**, which is "
-                f"**{summ['classification']}**. {summ['n_weak']} of {summ['n_subjects']} "
-                f"subject(s) are flagged as weak.")
-
-    if re.search(r"resource|material|video|book|course|learn|website|tutorial", q):
-        weak = [r for r in results if r["weak"]] or [summ["worst"]]
-        lines = []
-        for r in weak[:3]:
-            lines.append(f"**{r['subject']}**")
-            lines += [f"- {t}" + (f" - {u}" if u else "") for t, u in resources_for(r["subject"])]
-        return "Recommended resources for your priority subjects:\n\n" + "\n".join(lines)
-
-    if re.search(r"plan|timetable|schedule|study|hours|revision", q):
-        hrs = float(profile.get("study_hours") or 15)
-        plan = study_plan(results, hrs)
-        lines = [f"- **{p['Subject']}**: {p['Hours / week']:.1f} h/week ({p['Priority']} priority)" for p in plan]
-        return (f"Here is how to split your **{hrs:.0f} study hours** per week:\n" + "\n".join(lines) +
-                "\n\nStudy the hardest subject when you are freshest, and use 50-minute focus blocks with 10-minute breaks.")
-
-    if re.search(r"risk|fail|retake|supplementar|repeat|danger", q):
-        risky = [r for r in results if r["risk"] in ("High", "Medium")]
-        if not risky:
-            return "No subject is currently at risk of failing. Keep up the good work!"
-        return ("Subjects at risk:\n" + "\n".join(f"- {_fmt(r)} - risk **{r['risk']}**" for r in risky) +
-                "\n\nAct early: consult the lecturer and increase practice on these units.")
-
-    if re.search(r"attend", q):
-        att = profile.get("attendance", 75)
-        tip = "Excellent." if att >= 85 else "Try to raise this above 85% - it noticeably improves marks."
-        return f"Your recorded attendance is **{att:.0f}%**. {tip}"
-
-    if re.search(r"\b(hi|hello|hey|good (morning|afternoon|evening))\b", q):
-        return (f"Hello {name}! I'm your academic advisor. I can show your weak subjects, predict "
-                f"your final marks, build a study plan, or run 'what if' scenarios. What would you like?")
-
-    if re.search(r"thank", q):
-        return "You're welcome! Keep going - consistent effort beats last-minute cramming."
-
-    if re.search(r"help|what can you", q):
-        return ("Try asking me:\n- *Which subjects am I weak in?*\n- *How can I improve <subject>?*\n"
-                "- *Predict my final marks*\n- *What do I need to get a B in <subject>?*\n"
-                "- *What if I score 70 in <subject> exam?*\n- *Make me a study plan*\n"
-                "- *Recommend resources*")
-
-    if subj:
-        return (f"{_fmt(subj)}. Reasons: {subj['reasons'][0]} "
-                f"Ask *'How can I improve {subj['subject']}?'* for a full plan.")
-
-    return ("I'm not sure I understood that. Try *'Which subjects am I weak in?'*, "
-            "*'Predict my final marks'* or type **help** to see what I can do.")
+def _summary_text(profile: dict, results: list, summ: dict) -> str:
+    rows = "; ".join(f"{r['subject']} predicted {r['predicted']:.0f}% (risk {r['risk']})" for r in results)
+    return (f"Student course: {profile.get('course', 'unknown')}. Attendance {profile.get('attendance', '?')}%, "
+            f"study hours {profile.get('study_hours', '?')}/week. Results: {rows}. Average {summ['average']:.0f}%.")
 
 
 # --------------------------------------------------------------------------
 # Personalised report (self-contained HTML - open in a browser and Print > PDF)
 # --------------------------------------------------------------------------
-def generate_report_html(profile: dict, results: list) -> str:
+def generate_report_html(profile: dict, results: list, researcher=None) -> str:
     e = _html.escape
     summ = overall_summary(results)
     hrs = float(profile.get("study_hours") or 15)
@@ -493,7 +358,7 @@ def generate_report_html(profile: dict, results: list) -> str:
 
     detail = ""
     for r in sorted(results, key=lambda r: -r["priority"]):
-        res = "".join(f"<li>{e(t)}</li>" for t, _ in resources_for(r["subject"]))
+        res = "".join(f"<li>{e(t)}</li>" for t, _ in resources_for(r["subject"], researcher))
         detail += (f"<div class='card'><h3>{e(r['subject'])} - {r['predicted']:.0f}% "
                    f"(Grade {r['grade']})</h3><p><b>Diagnosis</b></p><ul>"
                    + "".join(f"<li>{e(x)}</li>" for x in r["reasons"])
@@ -543,3 +408,105 @@ def sample_marks() -> pd.DataFrame:
         "Assignment": [80, 75, 60, 50, 58, 42],
         "Exam": [None, None, None, None, None, None],
     })
+
+
+# --------------------------------------------------------------------------
+# AUTONOMOUS BEHAVIOUR  (perceive -> analyse -> decide -> recommend -> act)
+# --------------------------------------------------------------------------
+def draft_consult_email(profile: dict, r: dict) -> tuple[str, str]:
+    """Write an email asking the lecturer for help - the agent does this without being asked."""
+    who = profile.get("name") or "a student"
+    reg = profile.get("reg_no") or "(registration number)"
+    reasons = " ".join(r["reasons"][:2])
+    subject = f"Request for academic support - {r['subject']} ({reg})"
+    body = (f"Dear Lecturer,\n\nI am {who}, registration number {reg}, taking {r['subject']}. "
+            f"My coursework average is {r['ca_avg']:.0f}% and my projected result is about {r['predicted']:.0f}%. "
+            f"{reasons}\n\nI would like to meet you this week to go through the topics I am finding difficult and agree a "
+            f"revision plan. Please let me know a time that suits you.\n\nThank you,\n{who}")
+    return subject, body
+
+
+def study_calendar_ics(plan: list[dict], start: _dt.date | None = None) -> str:
+    """Turn the weekly study plan into a real calendar file (.ics) - 90 minute blocks, two slots per day."""
+    start = start or (_dt.date.today() + _dt.timedelta(days=1))
+    blocks = []
+    for p in plan:                                     # plan is already sorted by need
+        blocks += [p["Subject"]] * max(1, int(round(p["Hours / week"] / 1.5)))
+    # interleave subjects so the same one is not studied twice in a row
+    order, pool = [], list(blocks)
+    while pool:
+        pick = next((b for b in pool if not order or b != order[-1]), pool[0])
+        pool.remove(pick); order.append(pick)
+    slots = [(17, 0), (19, 0)]
+    now = _dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//AI Academic Advisor//EN", "CALSCALE:GREGORIAN"]
+    for i, subject in enumerate(order[:14]):
+        day = start + _dt.timedelta(days=i // 2)
+        h, m = slots[i % 2]
+        s = _dt.datetime.combine(day, _dt.time(h, m))
+        e = s + _dt.timedelta(minutes=90)
+        lines += ["BEGIN:VEVENT", f"UID:study-{i}-{s:%Y%m%dT%H%M}@advisor", f"DTSTAMP:{now}",
+                  f"DTSTART:{s:%Y%m%dT%H%M%S}", f"DTEND:{e:%Y%m%dT%H%M%S}",
+                  f"SUMMARY:Study - {subject}", "DESCRIPTION:Planned by the AI Academic Advisor", "END:VEVENT"]
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def agent_run(profile: dict, results: list) -> dict:
+    """One full agent cycle. Returns the five stages plus the artefacts the agent produced."""
+    if not results:
+        return {}
+    summ = overall_summary(results)
+    pending = [r for r in results if r["status"] == "Predicted"]
+    weak = sorted([r for r in results if r["weak"]], key=lambda r: -r["priority"])
+    declining = [r for r in results if r["trend"] <= -8]
+    hours = float(profile.get("study_hours") or 12)
+    plan = study_plan(results, hours)
+
+    perceive = [f"Read marks for {len(results)} subjects: {len(results) - len(pending)} with a final result, "
+                f"{len(pending)} still awaiting an exam.",
+                f"Student context: attendance {profile.get('attendance', 0):.0f}%, {hours:.0f} study hours a week."]
+    analyse = [f"Projected average is {summ['average']:.0f}% ({summ['classification']}).",
+               f"{len(weak)} of {len(results)} subjects are weak." +
+               (f" Weakest: {weak[0]['subject']} at {weak[0]['predicted']:.0f}%." if weak else "")]
+    for r in weak[:3]:
+        analyse.append(f"{r['subject']}: {r['reasons'][0]}")
+    if declining:
+        analyse.append("Declining marks in: " + ", ".join(r["subject"] for r in declining) + ".")
+
+    decide = []
+    for r in weak:
+        action = {"High": "escalate - lecturer consultation and a recovery plan",
+                  "Medium": "intervene - focused practice and coursework repair"}[r["risk"]]
+        decide.append(f"{r['subject']} ({r['risk']} risk): {action}.")
+    if not weak:
+        decide.append("No subject needs intervention; keep the current routine.")
+    if plan and weak:
+        decide.append(f"Moved the largest share of study time ({plan[0]['Hours / week']:.1f} h) to {plan[0]['Subject']}.")
+
+    recommend = [f"{r['subject']}: {r['activities'][0]}" for r in weak[:3]] or \
+                ["Stretch yourself with past-paper 'hard' questions."]
+
+    emails = {r["subject"]: draft_consult_email(profile, r) for r in weak if r["risk"] == "High"}
+    ics = study_calendar_ics(plan)
+    act = [f"Built a weekly study timetable ({ics.count('BEGIN:VEVENT')} sessions) as a calendar file."]
+    if emails:
+        act.append("Drafted consultation emails to lecturers for: " + ", ".join(emails) + ".")
+    if weak:
+        act.append(f"Raised an early-warning flag for {len(weak)} subject(s).")
+    return {"perceive": perceive, "analyse": analyse, "decide": decide, "recommend": recommend, "act": act,
+            "emails": emails, "ics": ics, "plan": plan}
+
+
+def model_report() -> dict:
+    """Honest check of the prediction model on data it never saw (still synthetic - see _train_model)."""
+    from sklearn.metrics import mean_absolute_error, r2_score
+    model, _ = _train_model()
+    rng = np.random.default_rng(2026)          # different seed from training
+    n = 1000
+    ca = np.clip(rng.normal(58, 15, n), 0, 100); trend = rng.normal(0, 8, n)
+    att = rng.uniform(40, 100, n); study = rng.uniform(0, 28, n)
+    y = np.clip(0.70 * ca + 0.35 * trend + 0.10 * (att - 75) + 0.30 * (np.minimum(study, 20) - 8) + 8
+                + rng.normal(0, 6, n), 0, 100)
+    pred = model.predict(np.column_stack([ca, trend, att, study]))
+    return {"r2": float(r2_score(y, pred)), "mae": float(mean_absolute_error(y, pred)), "n": n}

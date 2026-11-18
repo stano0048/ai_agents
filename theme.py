@@ -182,6 +182,13 @@ table.ui-table tr:last-child td {{ border-bottom:none; }}
 table.ui-table td.num, table.ui-table th.num {{ text-align:right; font-variant-numeric:tabular-nums; }}
 .ui-bar {{ background:var(--border); border-radius:4px; height:8px; width:100%; }}
 .ui-bar > div {{ height:8px; border-radius:4px; background:var(--accent); }}
+.ui-stage {{ display:grid; grid-template-columns:150px 1fr; gap:0; background:var(--surface); border:1px solid var(--border);
+  border-radius:8px; margin:0 0 8px 0; overflow:hidden; }}
+.ui-stage .h {{ padding:12px 14px; border-right:1px solid var(--border); background:var(--raised); font-weight:700; color:var(--text); }}
+.ui-stage .h small {{ display:block; font-weight:400; color:var(--muted) !important; }}
+.ui-stage .b {{ padding:8px 16px; color:var(--text); }}
+.ui-stage .b ul {{ margin:4px 0; padding-left:18px; }} .ui-stage .b li {{ margin:3px 0; }}
+@media (max-width:700px) {{ .ui-stage {{ grid-template-columns:1fr; }} .ui-stage .h {{ border-right:none; border-bottom:1px solid var(--border); }} }}
 </style>
 """
     st.markdown(css, unsafe_allow_html=True)
@@ -270,3 +277,19 @@ def style_fig(fig, height: int = 360, legend: bool = True):
 
 def show(fig, key: str | None = None) -> None:
     st.plotly_chart(fig, width="stretch", key=key, config={"displayModeBar": False})
+
+
+STAGES = [("perceive", "Perceive", "what it observed"), ("analyse", "Analyse", "what it concluded"),
+          ("decide", "Decide", "what it chose"), ("recommend", "Recommend", "advice for you"),
+          ("act", "Act", "what it did on its own")]
+
+
+def agent_loop(run: dict) -> None:
+    """Render one perceive -> analyse -> decide -> recommend -> act cycle (run = {stage: [str, ...]})."""
+    out = ""
+    for key, title, sub in STAGES:
+        items = run.get(key) or ["Nothing to report."]
+        lis = "".join(f"<li>{_html.escape(str(i))}</li>" for i in items)
+        out += (f'<div class="ui-stage"><div class="h">{title}<small>{sub}</small></div>'
+                f'<div class="b"><ul>{lis}</ul></div></div>')
+    st.markdown(out, unsafe_allow_html=True)

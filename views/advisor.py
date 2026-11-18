@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import advisor_engine as eng
+import services
 import theme
 
 RISK_TONE = {"High": "bad", "Medium": "warn", "Watch": "info", "Low": "good"}
@@ -12,11 +13,32 @@ P = theme.pal()
 theme.hero("Academic Advisor",
            "Enter your marks. The agent analyses them, predicts your final results, finds weak subjects "
            "and coaches you with a personalised plan.")
+services.source_button("advisor")
 
 # ------------------------------------------------------------------ state
 ss = st.session_state
 ss.setdefault("adv_marks", [])
 ss.setdefault("adv_chat", [])
+ss.setdefault("adv_res", {})        # researched resources, per unit name
+
+
+class SessionResearch:
+    """Uses researched results already in this session, otherwise the instant offline match (no network on every rerun)."""
+    def research_unit(self, unit):
+        return ss.adv_res.get(unit) or eng.unit_research(unit)
+
+
+def show_research(r: dict):
+    if r["summary"]:
+        st.caption(r["summary"])
+    for x in r["resources"][:7]:
+        label = f"{x['title']} ({x['type']})" if x.get("type") else x["title"]
+        st.markdown(f"- [{label}]({x['url']})" + (f" - {x['why']}" if x.get("why") else ""))
+    if r["activities"]:
+        st.markdown("**Study activities**")
+        for a in r["activities"][:4]:
+            st.markdown(f"- {a}")
+    st.caption(r["note"])
 
 
 def marks_df() -> pd.DataFrame:
@@ -35,9 +57,10 @@ def clear_marks():
 
 
 # ------------------------------------------------------------------- tabs
-t_in, t_dash, t_pred, t_rec, t_chat, t_rep = st.tabs([
+t_in, t_dash, t_pred, t_rec, t_act, t_chat, t_rep = st.tabs([
     ":material/person: Student & marks", ":material/monitoring: Dashboard", ":material/query_stats: Predictions",
-    ":material/lightbulb: Recommendations", ":material/forum: Ask the advisor", ":material/description: Report"])
+    ":material/lightbulb: Recommendations", ":material/smart_toy: Agent actions", ":material/forum: Ask the advisor",
+    ":material/description: Report"])
 
 # --------------------------------------------------------- student & marks
 with t_in:
@@ -201,6 +224,14 @@ with t_rec:
         theme.callout(NO_DATA, "info")
     else:
         st.subheader("Personalised recommendations, most urgent first")
+        c1, c2 = st.columns([2, 3])
+        if c1.button("Research resources for all my units", icon=":material/travel_explore:", type="primary", key="adv_research_all"):
+            with st.spinner("Researching each unit by name..."):
+                rs = services.researcher()
+                for r_ in results:
+                    ss.adv_res[r_["subject"]] = rs.research_unit(r_["subject"])
+        c2.caption("Active: " + services.intelligence_label() + ". Resources are researched from each unit's name, "
+                   "so any unit, listed or not, gets its own recommendations.")
         for r in sorted(results, key=lambda r: -r["priority"]):
             with st.expander(f"{r['subject']}  |  {r['predicted']:.0f}%  |  Grade {r['grade']}  |  {r['risk']} risk",
                              expanded=r["weak"]):
@@ -215,8 +246,20 @@ with t_rec:
                         st.markdown(f"- {x}")
                 with b:
                     st.markdown("**Learning resources**")
-                    for t, u in eng.resources_for(r["subject"]):
-                        st.markdown(f"- [{t}]({u})" if u else f"- {t}")
+                    show_research(SessionResearch().research_unit(r["subject"]))
+
+        st.subheader("Research any unit")
+        st.caption("Type any unit name, for example Entrepreneurship or System Programming. The agent researches it and recommends resources.")
+        with st.form("adv_unit_form"):
+            unit = st.text_input("Unit name", key="adv_unit_name", placeholder="e.g. Entrepreneurship")
+            go_ = st.form_submit_button("Research this unit", icon=":material/search:", type="primary")
+        if go_ and unit.strip():
+            with st.spinner("Researching..."):
+                ss.adv_res[unit.strip()] = services.researcher().research_unit(unit.strip())
+            ss.adv_last_unit = unit.strip()
+        if ss.get("adv_last_unit") in ss.adv_res:
+            st.markdown(f"**{ss.adv_last_unit}**")
+            show_research(ss.adv_res[ss.adv_last_unit])
 
         st.subheader("Weekly study plan")
         st.caption(f"Your {study_hours} study hours per week, shared in proportion to need.")
@@ -230,11 +273,32 @@ with t_rec:
         pt["Hours / week"] = pt["Hours / week"].map(lambda h: f"{h:.1f}")
         theme.html_table(pt, num_cols=("Hours / week",), tone_col="Priority", tones=RISK_TONE)
 
+# ----------------------------------------------------------- agent actions
+with t_act:
+    if not results:
+        theme.callout(NO_DATA, "info")
+    else:
+        run = eng.agent_run(profile, results)
+        st.subheader("What the agent did with your marks")
+        st.caption("This cycle runs automatically whenever your marks change. Nobody has to ask for it.")
+        theme.agent_loop(run)
+        st.subheader("Work the agent produced")
+        st.download_button("Download study timetable (calendar file)", run["ics"], file_name="study_timetable.ics",
+                           mime="text/calendar", icon=":material/event:", type="primary")
+        st.caption("Open the file in Google Calendar, Outlook or Apple Calendar to add the study sessions.")
+        if run["emails"]:
+            st.markdown("**Emails drafted for high-risk subjects**")
+            for subject, (subj_line, body) in run["emails"].items():
+                with st.expander(f"{subject}: {subj_line}"):
+                    st.text_area("Draft", body, height=230, key=f"adv_mail_{subject}", label_visibility="collapsed")
+        else:
+            st.caption("No subject is high risk, so no consultation emails were needed.")
+
 # -------------------------------------------------------------------- chat
 with t_chat:
     st.subheader("Chat with your advisor")
     if not ss.adv_chat:
-        ss.adv_chat.append(("assistant", eng.chat_response("hello", profile, results)))
+        ss.adv_chat.append(("assistant", eng.chat_response("hello", profile, results, services.researcher())))
 
     chips = ["Which subjects am I weak in?", "Predict my final marks", "Make me a study plan",
              "Recommend resources", "Help"]
@@ -248,12 +312,12 @@ with t_chat:
         with st.chat_message(role):
             st.markdown(text)
 
-    typed = st.chat_input("Ask: 'How can I improve <subject>?' or 'What if I score 70 in <subject> exam?'",
+    typed = st.chat_input("Ask about a unit, or anything about studying. 'Resources for entrepreneurship' works too.",
                           key="adv_input")
     question = clicked or typed
     if question:
         ss.adv_chat.append(("user", question))
-        ss.adv_chat.append(("assistant", eng.chat_response(question, profile, results)))
+        ss.adv_chat.append(("assistant", eng.chat_response(question, profile, results, services.researcher())))
         st.rerun()
 
 # ------------------------------------------------------------------ report
@@ -264,7 +328,7 @@ with t_rep:
         st.subheader("Personalised performance report")
         if not (name and reg_no and course):
             theme.callout("Fill in your name, registration number and course for a complete report.", "info")
-        report = eng.generate_report_html(profile, results)
+        report = eng.generate_report_html(profile, results, SessionResearch())
         st.download_button("Download report (HTML, print to PDF)", report, icon=":material/download:",
                            file_name=f"performance_report_{(reg_no or 'student').replace('/', '-')}.html",
                            mime="text/html", type="primary")

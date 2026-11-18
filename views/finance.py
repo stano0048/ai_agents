@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import finance_engine as fe
+import services
 import theme
 
 P = theme.pal()
@@ -14,13 +15,15 @@ PRIORITY_TONE = {"High": "bad", "Medium": "warn", "Low": "info"}
 theme.hero("Finance Agent",
            "Record income and daily spending. The agent categorises every expense, finds patterns and waste, "
            "predicts next month and recommends how to save.")
+services.source_button("finance")
 
 ss = st.session_state
 if "fin_cat" not in ss:
-    ss.fin_cat = fe.Categoriser()
+    ss.fin_cat = fe.Categoriser(services.database(), services.gemini())
     ss.fin_tx = fe.empty_tx()
     ss.fin_income = []
 cat: fe.Categoriser = ss.fin_cat
+cat.gemini = services.gemini()        # picks up a key pasted after the page loaded
 
 
 def load_sample():
@@ -41,10 +44,10 @@ def recategorise():
         df.loc[mask, "confidence"] = [r[1] for r in res]
 
 
-t_in, t_over, t_pat, t_fc, t_rec, t_goal, t_rep = st.tabs([
+t_in, t_over, t_pat, t_fc, t_rec, t_auto, t_goal, t_rep = st.tabs([
     ":material/payments: Income & expenses", ":material/pie_chart: Overview", ":material/search_insights: Patterns",
-    ":material/trending_up: Forecast", ":material/savings: Recommendations", ":material/flag: Savings goal",
-    ":material/description: Report"])
+    ":material/trending_up: Forecast", ":material/savings: Recommendations", ":material/smart_toy: Autopilot",
+    ":material/flag: Savings goal", ":material/description: Report"])
 
 # --------------------------------------------------------- income & expenses
 with t_in:
@@ -156,7 +159,7 @@ def short_notice():
 
 # ------------------------------------------------------------------ overview
 if a is None:
-    for t in (t_over, t_pat, t_fc, t_rec, t_goal, t_rep):
+    for t in (t_over, t_pat, t_fc, t_rec, t_auto, t_goal, t_rep):
         need_data(t)
 else:
     with t_over:
@@ -307,6 +310,53 @@ else:
                 st.markdown(r["detail"])
                 if r["saving"]:
                     st.caption(f"Potential saving: up to {money(r['saving'])} per month")
+        st.write("")
+        if st.button("Ask Gemini for a plain-language plan", icon=":material/psychology:", key="fin_gem_plan",
+                     disabled=not services.gemini().available(),
+                     help="Needs a Gemini API key (sidebar). Gemini only rewrites the agent's own numbers."):
+            with st.spinner("Asking Gemini..."):
+                ss.fin_gem = fe.gemini_plan(services.gemini(), a, f, recs)
+            if not ss.fin_gem:
+                theme.callout("Gemini did not answer: " + services.gemini().last_error, "warn")
+        if ss.get("fin_gem"):
+            theme.callout(ss.fin_gem["text"], "info")
+        elif not services.gemini().available():
+            st.caption("Add a Gemini key in the sidebar to get an AI-written plan. The agent's own recommendations above work without it.")
+
+    # --------------------------------------------------------------- autopilot
+    with t_auto:
+        short_notice()
+        st.subheader("What the agent does on its own")
+        st.caption("Without being asked, the agent sets budgets, watches the month, warns you before you overspend, "
+                   "schedules your saving and prepares disputes for double charges.")
+        payday = st.number_input("Your payday (day of the month)", 1, 28, 25, key="fin_payday")
+        ap = fe.autopilot(df, a, f, int(payday))
+        theme.agent_loop(fe.agent_run(a, f, recs, ap, cur))
+        st.subheader("Budgets the agent set")
+        bt = ap["budget"].copy()
+        bt = pd.DataFrame({"Category": bt["Category"], "Typical month": bt["Typical"].map(lambda v: f"{v:,.0f}"),
+                           "New budget": bt["Budget"].map(lambda v: f"{v:,.0f}"),
+                           "Change": bt["Change"].map(lambda v: f"{v:+,.0f}"), "Reason": bt["Why"]})
+        theme.html_table(bt, num_cols=("Typical month", "New budget", "Change"))
+        st.subheader(f"Month-to-date watch ({ap['month']}, day {ap['elapsed']})")
+        if ap["alerts"]:
+            for al in ap["alerts"]:
+                theme.callout(al["Message"], "bad" if al["Spent so far"] >= al["Budget"] else "warn")
+        elif ap["elapsed"] < 7:
+            st.caption("The agent starts watching after a week of the month has passed.")
+        else:
+            theme.callout("Every everyday category is on pace to stay within its budget.", "good")
+        st.subheader("Saving transfers scheduled")
+        theme.cards([("Monthly transfer", money(ap["transfer_amount"]), "pay yourself first", "good"),
+                     ("Next transfers", ", ".join(f"{d:%d %b}" for d in ap["transfer_dates"]), f"on day {ap['payday']}"),
+                     ("Needs", "following the new budgets", "the transfer assumes the trimmed categories are respected")])
+        dups = a["spend"][a["spend"].duplicated(["date", "description", "amount"], keep="first")]
+        if len(dups):
+            st.subheader("Duplicate charges flagged")
+            for i, row in dups.iterrows():
+                with st.expander(f"{row['date']:%d %b}: {row['description']} ({row['amount']:,.0f})"):
+                    st.text_area("Draft message", fe.draft_dispute(st.session_state.get("fin_owner", ""), cur, row),
+                                 height=190, key=f"fin_disp_{i}", label_visibility="collapsed")
 
     # -------------------------------------------------------------------- goal
     with t_goal:

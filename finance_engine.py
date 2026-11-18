@@ -17,6 +17,7 @@ but the amounts are currency-agnostic.
 """
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import html as _html
 import io
@@ -90,8 +91,19 @@ def _norm(s: str) -> str:
 # Expense categorisation (text classifier that can learn)
 # --------------------------------------------------------------------------
 class Categoriser:
-    def __init__(self):
+    """db: remembers corrections between visits. gemini: optional, resolves descriptions the model is unsure about."""
+    ASSIST_BELOW = 0.45          # ask Gemini only when the model's confidence is under this
+    ASSIST_BUDGET = 20           # at most this many Gemini lookups per batch
+
+    def __init__(self, db=None, gemini=None):
+        self.db = db
+        self.gemini = gemini
+        self.assist_left = self.ASSIST_BUDGET
+        self.assisted = 0
         self.extra: list[tuple[str, str]] = []
+        if db:
+            for desc, c in db.fin_corrections():
+                self.extra.extend([(desc, c)] * 3)
         self.train()
 
     def _pipe(self):
@@ -115,12 +127,35 @@ class Categoriser:
     def predict(self, desc: str) -> tuple[str, float]:
         p = self.model.predict_proba([_norm(desc)])[0]
         i = int(np.argmax(p))
-        return str(self.model.classes_[i]), float(p[i])
+        cat, conf = str(self.model.classes_[i]), float(p[i])
+        if conf < self.ASSIST_BELOW and self.gemini is not None and self.assist_left > 0 and self.gemini.available():
+            got = self._ask_gemini(desc)
+            if got:
+                return got, 0.6
+        return cat, conf
+
+    def _ask_gemini(self, desc: str):
+        """Gemini picks one of OUR categories for a description the model does not recognise. Anything else is ignored."""
+        cats = list(self.model.classes_)
+        self.assist_left -= 1
+        r = self.gemini.generate(
+            "Classify this Kenyan personal-finance transaction description into exactly one of these categories: "
+            + ", ".join(cats) + f".\nDescription: {desc}\nReply with the category name only.",
+            temperature=0.0, cache_key="fincat:" + desc.lower())
+        if r["ok"]:
+            ans = r["text"].strip().strip(".").strip()
+            for c in cats:
+                if ans.lower() == str(c).lower():
+                    self.assisted += 1
+                    return str(c)
+        return None
 
     def predict_many(self, descs) -> list[tuple[str, float]]:
         return [self.predict(d) for d in descs]
 
     def learn(self, desc: str, category: str):
+        if self.db:
+            self.db.fin_add_correction(desc, category)
         self.extra.append((desc, category))
         self.extra.extend([(desc, category)] * 2)          # corrections count more than seed data
         self.train()
@@ -142,6 +177,7 @@ def empty_tx() -> pd.DataFrame:
 
 def add_transactions(df: pd.DataFrame, rows: list[tuple], cat: Categoriser) -> pd.DataFrame:
     """rows: (date, description, amount[, category]). Missing categories are predicted automatically."""
+    cat.assist_left = cat.ASSIST_BUDGET
     new = []
     for r in rows:
         d, desc, amt = pd.Timestamp(r[0]).normalize(), str(r[1]).strip(), float(r[2])
@@ -555,3 +591,130 @@ def sample_data(cat: Categoriser, days: int = 90, today: dt.date | None = None) 
     rows.append((end - pd.Timedelta(days=9), "Naivas supermarket", 2450.0))      # duplicate charge
     df = add_transactions(empty_tx(), rows, cat)
     return df, [{"source": "Salary", "amount": 80000.0, "frequency": "Monthly"}]
+
+
+# --------------------------------------------------------------------------
+# AUTONOMOUS BEHAVIOUR  (budget, watch the month, alert, schedule saving, dispute)
+# --------------------------------------------------------------------------
+PACED = {"Food & Groceries", "Eating Out", "Transport", "Entertainment", "Shopping"}
+HELD_OUT = [
+    ("Tuskys shopping", "Food & Groceries"), ("Rongai matatu", "Transport"), ("KPLC prepaid units", "Utilities"),
+    ("Netflix renewal", "Subscriptions"), ("Safaricom 1GB bundle", "Airtime & Data"), ("Chemist panadol", "Health"),
+    ("Textbook purchase", "Education"), ("Harambee for neighbour", "Family & Giving"), ("Cinema with friends", "Entertainment"),
+    ("Barber shop", "Personal Care"), ("Jumia shoes", "Shopping"), ("Rent for December", "Rent & Housing"),
+    ("Pizza Inn lunch", "Eating Out"), ("Sacco deposit", SAV), ("Bank ledger fee", "Other"), ("Uber to airport", "Transport"),
+    ("Gas cylinder refill", "Utilities"), ("Showmax", "Subscriptions"), ("Mama mboga sukuma", "Food & Groceries"),
+]
+
+
+def categoriser_heldout(cat: "Categoriser") -> dict:
+    wrong = []
+    for text, exp in HELD_OUT:
+        got = cat.predict(text)[0]
+        if got != exp:
+            wrong.append((text, exp, got))
+    return {"accuracy": 1 - len(wrong) / len(HELD_OUT), "n": len(HELD_OUT), "wrong": wrong}
+
+
+def autopilot(df: pd.DataFrame, a: dict, f: dict, payday: int = 25) -> dict:
+    """Decide budgets without being asked, watch the current month against them, and schedule the saving."""
+    inc = a["income_m"]
+    rows = []
+    for c, r in a["by_cat"].iterrows():
+        typical, cap = r["monthly"], CAPS.get(c)
+        cap_amt = cap / 100 * inc if (cap and inc) else None
+        if cap_amt and GROUP[c] == "Wants" and typical > cap_amt:
+            budget, why = cap_amt, "discretionary, capped at the guideline"
+        elif cap_amt and GROUP[c] == "Needs" and typical > cap_amt * 1.05:
+            budget, why = typical * 0.95, "essential, trimmed by 5%"
+        else:
+            budget, why = typical * 1.05, "within guideline, kept with 5% room"
+        rows.append({"Category": c, "Typical": typical, "Budget": budget, "Change": budget - typical, "Why": why})
+    budget_df = pd.DataFrame(rows)
+
+    # watch the latest month against the budgets
+    last = a["last"]
+    month_start = last.replace(day=1)
+    dim = calendar.monthrange(last.year, last.month)[1]
+    elapsed = (last - month_start).days + 1
+    spent = df[(df["date"] >= month_start) & (df["category"] != SAV)].groupby("category")["amount"].sum()
+    alerts = []
+    if elapsed >= 7:
+        for _, r in budget_df.iterrows():
+            c, b = r["Category"], r["Budget"]
+            s_now = float(spent.get(c, 0.0))
+            if s_now <= 0:
+                continue
+            rate = s_now / elapsed
+            # everyday categories are projected from the daily pace; bills and one-off categories keep their usual size
+            projected = rate * dim if c in PACED else max(s_now, float(r["Typical"]))
+            if projected > b * 1.10:
+                if s_now >= b:
+                    when = "the budget is already used up"
+                elif c not in PACED:
+                    when = "this is already above the budget"
+                else:
+                    day = int(np.ceil(b / rate))
+                    when = f"the limit will be reached around {(month_start + pd.Timedelta(days=day - 1)):%d %b}"
+                alerts.append({"Category": c, "Spent so far": s_now, "Budget": b, "Projected": projected,
+                               "Message": f"{c} is on pace for {projected:,.0f} against a budget of {b:,.0f}; {when}."})
+
+    cuts = float(-budget_df[budget_df["Change"] < 0]["Change"].sum())
+    achievable = max(a["surplus_m"], 0) + cuts
+    amount = float(np.floor(min(0.2 * inc, achievable) / 100) * 100) if inc else 0.0
+    today = last
+    dates = []
+    for k in range(3):
+        y, m = today.year + (today.month - 1 + k + (1 if today.day >= payday else 0)) // 12, \
+               (today.month - 1 + k + (1 if today.day >= payday else 0)) % 12 + 1
+        dates.append(dt.date(y, m, min(payday, calendar.monthrange(y, m)[1])))
+    disputes = []
+    for _, r in a["pat"]["unusual"].iterrows() if len(a["pat"]["unusual"]) else []:
+        if "duplicate" in r["Why"]:
+            disputes.append(f"{r['Date']}: {r['Description']} charged twice ({r['Amount']:,.0f}). Draft dispute prepared.")
+    return {"budget": budget_df, "alerts": alerts, "transfer_amount": amount, "transfer_dates": dates, "payday": payday,
+            "disputes": disputes, "elapsed": elapsed, "month": f"{last:%B %Y}", "cuts": cuts}
+
+
+def draft_dispute(owner: str, cur: str, row: pd.Series) -> str:
+    return (f"Subject: Duplicate charge on {row['date']:%d %B %Y}\n\nHello,\n\nI see two identical charges of {cur} "
+            f"{row['amount']:,.0f} for '{row['description']}' on {row['date']:%d %B %Y}. Please review the second charge and "
+            f"reverse it if it was made in error.\n\nThank you,\n{owner or 'Customer'}")
+
+
+def agent_run(a: dict, f: dict, recs: list, ap: dict, cur: str = "KES") -> dict:
+    m = lambda v: f"{cur} {v:,.0f}"
+    pat = a["pat"]
+    perceive = [f"Read {len(a['spend']):,} spending records over {a['days']} days ({a['first']:%d %b} to {a['last']:%d %b}).",
+                f"Income on record: {m(a['income_m'])} a month." if a["income_m"] else "No income entered yet."]
+    analyse = [f"Spending is about {m(a['spend_m'])} a month; savings rate {a['savings_rate']:.0%}.",
+               f"Highest category: {a['by_cat'].index[0]} ({a['by_cat'].iloc[0]['share']:.0%} of spending).",
+               f"Spending peaks on {pat['peak_day']}; weekends run {pat['weekend_ratio']:.1f}x weekdays."]
+    if len(a["excess"]):
+        analyse.append(f"{len(a['excess'])} categories exceed their guideline, led by {a['excess'].iloc[0]['Category']}.")
+    analyse.append(f"Forecast for the next {f['horizon']} days: {m(f['total'])} (model: {f['model']}).")
+    decide = [f"Set {len(ap['budget'])} category budgets; trimmed {m(ap['cuts'])} a month from over-guideline categories."]
+    decide.append(f"Chose a monthly saving transfer of {m(ap['transfer_amount'])}." if ap["transfer_amount"] else
+                  "Cannot choose a transfer until income is entered.")
+    decide += [x["Message"] for x in ap["alerts"][:3]]
+    recommend = [r["title"] + (f" (up to {m(r['saving'])} a month)" if r["saving"] else "") for r in recs[:4]]
+    act = [f"Created a {ap['month']} budget for every category.",
+           f"Scheduled saving transfers of {m(ap['transfer_amount'])} on " + ", ".join(f"{d:%d %b}" for d in ap["transfer_dates"]) + " (assuming the new budgets are followed)."
+           if ap["transfer_amount"] else "No transfer scheduled."]
+    act.append(f"Raised {len(ap['alerts'])} overspending alert(s) before the month ends.")
+    if ap["disputes"]:
+        act.append(f"Flagged {len(ap['disputes'])} duplicate charge(s) and drafted a dispute message.")
+    return {"perceive": perceive, "analyse": analyse, "decide": decide, "recommend": recommend, "act": act}
+
+
+def gemini_plan(gemini, a: dict, f: dict, recs: list) -> dict | None:
+    """Ask Gemini to turn the agent's own numbers into a short, plain-language plan. It may not invent figures."""
+    if gemini is None or not gemini.available():
+        return None
+    top = "; ".join(f"{r['title']} (up to {r['saving']:,.0f}/month)" for r in recs[:5])
+    facts = (f"Monthly income {a['income_m']:,.0f}; monthly spending {a['spend_m']:,.0f}; savings rate {a['savings_rate']:.0%}; "
+             f"forecast next 30 days spending {f['total']:,.0f}. Agent's recommendations: {top}.")
+    r = gemini.generate(
+        "You are a practical personal-finance coach in Kenya. Using ONLY these numbers, write a plan in under 140 words with "
+        "three concrete steps for this month. Do not invent figures.\n" + facts, temperature=0.4)
+    return {"text": r["text"], "sources": []} if r["ok"] else None
