@@ -25,7 +25,7 @@ from reportlab.platypus.tableofcontents import TableOfContents
 ROOT = Path(__file__).resolve().parent
 ACCENT, INK, MUTED, LINE, SOFT = "#2a78d6", "#1c2333", "#5b6475", "#d8d7d2", "#f1f1ee"
 UNIVERSITY = "Karatina University"
-UNIT = "Python Programming: Artificial Intelligence and Intelligent Agents"
+UNIT = "COM 316: Artificial Intelligence and Expert Systems"
 
 ST = {
     "body": ParagraphStyle("body", fontName="Helvetica", fontSize=10, leading=14.5, textColor=colors.HexColor(INK), spaceAfter=6),
@@ -171,7 +171,7 @@ def build_pdf(db) -> bytes:
     s += [Spacer(1, 3.2 * cm), P("GROUP PRACTICAL ASSIGNMENT", "sub"), Spacer(1, 6), P("AI Agents Suite", "title"), Spacer(1, 6),
           P("Three Python AI agents: an Academic Advisor, a Supermarket Support Agent and a Personal Finance Agent, with Gemini-assisted "
             "research and a shared database.", "sub"), Spacer(1, 1.2 * cm),
-          table([["Institution", UNIVERSITY], ["Unit", UNIT], ["Assignment", "Group practical assignment, 100 marks"],
+          table([["Institution", UNIVERSITY], ["Unit", UNIT], ["Assignment", "Group practical assignment"],
                  ["Questions implemented", "Question 1 (Academic Advisory), Question 3 (Customer Support), Question 5 (Personal Finance)"],
                  ["Report date", dt.date.today().strftime("%d %B %Y")], ["Group size", f"{len(members)} of 6 members recorded"]],
                 [4.2 * cm, 12.6 * cm], header=False),
